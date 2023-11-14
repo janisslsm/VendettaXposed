@@ -137,7 +137,6 @@ class Main : IXposedHookZygoteInit, IXposedHookLoadPackage, IXposedHookInitPacka
             // Iterate over the list of fontFamilyNames, constructing new FontFamily objects
             // for use in the CustomFallbackBuilder below.
             for (fontFamilyName in fontFamilyNames) {
-                // ALIUCORD CHANGED: font lookup from external storage
                 for (fileExtension in FILE_EXTENSIONS) {
                     val fileName = java.lang.StringBuilder()
                         .append(files.absolutePath)
