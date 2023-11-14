@@ -1,19 +1,27 @@
 package com.vendetta.xposed
 
+import android.R.style
 import android.app.AndroidAppHelper
 import android.content.Context
-import android.graphics.Color
 import android.content.res.AssetManager
 import android.content.res.Resources
 import android.content.res.XModuleResources
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.Typeface.CustomFallbackBuilder
+import android.graphics.fonts.Font
+import android.graphics.fonts.FontFamily
 import android.os.Build
+import android.os.Environment
 import android.util.Log
 import androidx.core.content.ContextCompat
+import de.robv.android.xposed.IXposedHookInitPackageResources
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.IXposedHookZygoteInit
-import de.robv.android.xposed.IXposedHookInitPackageResources
 import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedBridge
+import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_InitPackageResources
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import kotlinx.serialization.Serializable
@@ -21,9 +29,9 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.HashMap
 
 @Serializable
 data class CustomLoadUrl(
@@ -66,7 +74,12 @@ data class SysColors(
 )
 
 class Main : IXposedHookZygoteInit, IXposedHookLoadPackage, IXposedHookInitPackageResources {
+    private val EXTENSIONS = arrayOf("", "_bold", "_italic", "_bold_italic")
+    private val FILE_EXTENSIONS = arrayOf(".ttf", ".otf")
+    private val FONTS_ASSET_PATH = "fonts/"
+
     private lateinit var modResources: XModuleResources
+    private lateinit var files: File
     private val rawColorMap = mutableMapOf<String, Int>()
 
     override fun initZygote(startupParam: IXposedHookZygoteInit.StartupParam) {
@@ -114,6 +127,127 @@ class Main : IXposedHookZygoteInit, IXposedHookLoadPackage, IXposedHookInitPacka
             }
         }
     }
+    private fun createAssetTypefaceWithFallbacks(
+        fontFamilyNames: Array<String>,
+        style: Int,
+        assetManager: AssetManager
+    ): Typeface? {
+        val fontFamilies: MutableList<FontFamily> = ArrayList()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Iterate over the list of fontFamilyNames, constructing new FontFamily objects
+            // for use in the CustomFallbackBuilder below.
+            for (fontFamilyName in fontFamilyNames) {
+                // ALIUCORD CHANGED: font lookup from external storage
+                for (fileExtension in FILE_EXTENSIONS) {
+                    val fileName = java.lang.StringBuilder()
+                        .append(files.absolutePath)
+                        .append("/fonts/")
+                        .append(fontFamilyName)
+                        .append(fileExtension)
+                        .toString()
+                    try {
+                        val font = Font.Builder(File(fileName)).build()
+                        val family = FontFamily.Builder(font).build()
+                        fontFamilies.add(family)
+                    } catch (e: java.lang.RuntimeException) {
+                        // If the typeface asset does not exist, try another extension.
+                        continue
+                    } catch (e: IOException) {
+                        // If the font asset does not exist, try another extension.
+                        continue
+                    }
+                }
+                for (fileExtension in FILE_EXTENSIONS) {
+                    val fileName = java.lang.StringBuilder()
+                        .append(FONTS_ASSET_PATH)
+                        .append(fontFamilyName)
+                        .append(fileExtension)
+                        .toString()
+                    try {
+                        val font = Font.Builder(assetManager, fileName).build()
+                        val family = FontFamily.Builder(font).build()
+                        fontFamilies.add(family)
+                    } catch (e: java.lang.RuntimeException) {
+                        // If the typeface asset does not exist, try another extension.
+                        continue
+                    } catch (e: IOException) {
+                        // If the font asset does not exist, try another extension.
+                        continue
+                    }
+                }
+            }
+
+            // If there's some problem constructing fonts, fall back to the default behavior.
+            if (fontFamilies.size == 0) {
+                return createAssetTypeface(fontFamilyNames[0], style, assetManager)
+            }
+            val fallbackBuilder = CustomFallbackBuilder(fontFamilies[0])
+            for (i in 1 until fontFamilies.size) {
+                fallbackBuilder.addCustomFallback(fontFamilies[i])
+            }
+            return fallbackBuilder.build()
+        }
+        return null
+    }
+    private fun createAssetTypeface(
+        fontFamilyName_: String, style: Int, assetManager: AssetManager
+    ): Typeface? {
+        // This logic attempts to safely check if the frontend code is attempting to use
+        // fallback fonts, and if it is, to use the fallback typeface creation logic.
+        var fontFamilyName: String = fontFamilyName_
+        val fontFamilyNames =
+            fontFamilyName.split(",".toRegex())
+                .dropLastWhile { it.isEmpty() }
+                .toTypedArray()
+        for (i in fontFamilyNames.indices) {
+            fontFamilyNames[i] = fontFamilyNames[i].trim()
+        }
+
+        // If there are multiple font family names:
+        //   For newer versions of Android, construct a Typeface with fallbacks
+        //   For older versions of Android, ignore all the fallbacks and just use the first font family
+        if (fontFamilyNames.size > 1) {
+            fontFamilyName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                return createAssetTypefaceWithFallbacks(fontFamilyNames, style, assetManager)
+            } else {
+                fontFamilyNames[0]
+            }
+        }
+
+        val extension = EXTENSIONS[style]
+        for (fileExtension in FILE_EXTENSIONS) {
+            val fileName = java.lang.StringBuilder()
+                .append(files.absolutePath)
+                .append("/fonts/")
+                .append(fontFamilyName)
+                .append(extension)
+                .append(fileExtension)
+                .toString()
+            return try {
+                Typeface.createFromFile(fileName)
+            } catch (e: java.lang.RuntimeException) {
+                // If the typeface asset does not exist, try another extension.
+                continue
+            }
+        }
+        // Lastly, after all those checks above, this is the original RN logic for
+        // getting the typeface.
+        for (fileExtension in FILE_EXTENSIONS) {
+            val fileName = java.lang.StringBuilder()
+                .append(FONTS_ASSET_PATH)
+                .append(fontFamilyName)
+                .append(extension)
+                .append(fileExtension)
+                .toString()
+            return try {
+                Typeface.createFromAsset(assetManager, fileName)
+            } catch (e: java.lang.RuntimeException) {
+                // If the typeface asset does not exist, try another extension.
+                continue
+            }
+        }
+        return Typeface.create(fontFamilyName, style)
+    }
 
     override fun handleLoadPackage(param: XC_LoadPackage.LoadPackageParam) {
         if (param.packageName.contains(".webview")) return
@@ -144,7 +278,7 @@ class Main : IXposedHookZygoteInit, IXposedHookLoadPackage, IXposedHookInitPacka
         val syscolorsJs = File(cache, "vendetta_syscolors.js")
 
         lateinit var config: LoaderConfig
-        val files = File(param.appInfo.dataDir, "files").also { it.mkdirs() }
+        files = File(param.appInfo.dataDir, "files").also { it.mkdirs() }
         val configFile = File(files, "vendetta_loader.json")
         val themeFile = File(files, "vendetta_theme.json")
 
@@ -333,6 +467,17 @@ class Main : IXposedHookZygoteInit, IXposedHookLoadPackage, IXposedHookInitPacka
         XposedBridge.hookMethod(loadScriptFromAssets, patch)
         XposedBridge.hookMethod(loadScriptFromFile, patch)
 
+        XposedHelpers.findAndHookMethod("com.facebook.react.views.text.ReactFontManager", param.classLoader, "createAssetTypeface",
+                String::class.java,
+                Int::class.java,
+                "android.content.res.AssetManager", object : XC_MethodReplacement() {
+                    override fun replaceHookedMethod(param: MethodHookParam): Typeface? {
+                        val fontFamilyName: String = param.args[0].toString();
+                        val style: Int = param.args[1] as Int;
+                        val assetManager: AssetManager = param.args[2] as AssetManager;
+                        return createAssetTypeface(fontFamilyName, style, assetManager)
+                    }
+                });
         // Fighting the side effects of changing the package name
         if (param.packageName != "com.discord") {
             val getIdentifier = Resources::class.java.getDeclaredMethod(
